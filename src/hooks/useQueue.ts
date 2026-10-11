@@ -3,9 +3,8 @@
  * These hooks provide the reactive data layer between the UI and queue operations.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import type { Token, ServiceType, TokenStatus } from '../lib/database.types';
-import { getServiceConfig } from '../lib/database.types';
+import { useState, useEffect, useCallback } from 'react';
+import type { Token, ServiceType } from '../lib/database.types';
 import {
   fetchTodayTokens,
   fetchSessionToken,
@@ -16,11 +15,9 @@ import {
   calculateETA,
   calculateQueuePressure,
   subscribeToTokenChanges,
-  getSessionId,
   resetTodayQueue,
 } from '../lib/queue';
 import type { QueuePressure } from '../lib/queue';
-import { isSupabaseConfigured } from '../lib/supabase';
 
 // ──────────────────────────────────────────────
 // useQueueData — master hook for all token data
@@ -48,11 +45,6 @@ export function useQueueData() {
 
   const loadTokens = useCallback(async () => {
     try {
-      if (!isSupabaseConfigured()) {
-        setError('Supabase not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env.local');
-        setLoading(false);
-        return;
-      }
       const data = await fetchTodayTokens();
       setTokens(data);
       setError(null);
@@ -70,26 +62,24 @@ export function useQueueData() {
     loadTokens();
   }, [loadTokens]);
 
-  // Real-time subscription
+  // Real-time subscription (Supabase or BroadcastChannel)
   useEffect(() => {
-    if (!isSupabaseConfigured()) return;
-
     const unsubscribe = subscribeToTokenChanges((payload) => {
       setTokens(prev => {
         const newToken = payload.new;
-        const idx = prev.findIndex(t => t.id === newToken.id);
+        const oldId = payload.old?.id || newToken?.id;
 
         if (payload.eventType === 'DELETE') {
-          return prev.filter(t => t.id !== (payload.old?.id || newToken.id));
+          if (oldId === '__all__') return [];
+          return prev.filter(t => t.id !== oldId);
         }
 
+        const idx = prev.findIndex(t => t.id === newToken.id);
         if (idx >= 0) {
-          // Update existing
           const updated = [...prev];
           updated[idx] = newToken;
           return updated;
         } else {
-          // Insert new
           return [...prev, newToken].sort(
             (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
           );
@@ -147,10 +137,6 @@ export function useStudentToken() {
   useEffect(() => {
     async function load() {
       try {
-        if (!isSupabaseConfigured()) {
-          setLoading(false);
-          return;
-        }
         const existing = await fetchSessionToken();
         setToken(existing);
       } catch (err: any) {
@@ -164,7 +150,7 @@ export function useStudentToken() {
 
   // Subscribe to updates on the current token
   useEffect(() => {
-    if (!token || !isSupabaseConfigured()) return;
+    if (!token) return;
 
     const unsubscribe = subscribeToTokenChanges((payload) => {
       if (payload.new && payload.new.id === token.id) {
@@ -244,21 +230,15 @@ export function useStaffActions() {
     setLastError(null);
     setLastSuccess(null);
     try {
-      // Check if token is in 'called' state and transition through 'serving' first
-      const token = await updateTokenStatus(tokenId, 'serving');
+      try {
+        await updateTokenStatus(tokenId, 'serving');
+      } catch {}
       const completed = await updateTokenStatus(tokenId, 'completed');
       setLastSuccess(`Completed token ${completed.token_number}`);
       return completed;
     } catch (err: any) {
-      // If already serving, try direct complete
-      try {
-        const completed = await updateTokenStatus(tokenId, 'completed');
-        setLastSuccess(`Completed token ${completed.token_number}`);
-        return completed;
-      } catch (err2: any) {
-        setLastError(err2.message);
-        return null;
-      }
+      setLastError(err.message);
+      return null;
     } finally {
       setOperationPending(false);
     }
@@ -330,7 +310,7 @@ export function useETA(serviceType: ServiceType | null, tokensAhead: number) {
   const [eta, setEta] = useState<{ estimatedMinutes: number; basedOnHistory: boolean; sampleSize: number } | null>(null);
 
   useEffect(() => {
-    if (!serviceType || tokensAhead < 0 || !isSupabaseConfigured()) {
+    if (!serviceType || tokensAhead < 0) {
       setEta(null);
       return;
     }
@@ -349,7 +329,7 @@ export function useQueuePressure(serviceType: ServiceType | null) {
   const [pressure, setPressure] = useState<QueuePressure | null>(null);
 
   useEffect(() => {
-    if (!serviceType || !isSupabaseConfigured()) {
+    if (!serviceType) {
       setPressure(null);
       return;
     }
@@ -359,7 +339,7 @@ export function useQueuePressure(serviceType: ServiceType | null) {
     };
 
     fetchPressure();
-    const interval = setInterval(fetchPressure, 30000); // Update every 30s
+    const interval = setInterval(fetchPressure, 30000);
 
     return () => clearInterval(interval);
   }, [serviceType]);

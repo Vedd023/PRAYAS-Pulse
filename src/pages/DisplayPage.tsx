@@ -15,13 +15,7 @@ export default function DisplayPage() {
     setLastUpdated(new Date());
   }, [tokens]);
 
-  if (!isSupabaseConfigured()) {
-    return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
-        <p className="text-white text-xl">Supabase not configured. Set environment variables.</p>
-      </div>
-    );
-  }
+
 
   if (loading) {
     return (

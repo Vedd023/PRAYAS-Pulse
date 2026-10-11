@@ -32,16 +32,11 @@ export default function StudentPage() {
 
   const eta = useETA(token?.service_type || null, tokensAhead);
 
-  if (!isSupabaseConfigured()) {
-    return (
-      <div className="max-w-lg mx-auto px-4 py-12">
-        <AlertBanner
-          type="warning"
-          message="Supabase is not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env.local file to connect to the database."
-        />
-      </div>
-    );
-  }
+  const demoNotice = !isSupabaseConfigured() ? (
+    <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs px-3 py-2 rounded-lg flex items-center justify-between">
+      <span>💡 Local Demo Mode active. Open in another tab to test live sync.</span>
+    </div>
+  ) : null;
 
   if (loading) {
     return <LoadingSpinner message="Loading your queue status..." />;
@@ -71,6 +66,7 @@ export default function StudentPage() {
           <ConnectionStatus />
         </div>
 
+        {demoNotice}
         {error && <AlertBanner type="error" message={error} />}
 
         {/* Token Display */}
@@ -215,6 +211,7 @@ export default function StudentPage() {
         <ConnectionStatus />
       </div>
 
+      {demoNotice}
       {error && <AlertBanner type="error" message={error} />}
 
       {/* Service Selection */}

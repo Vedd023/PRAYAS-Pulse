@@ -25,16 +25,11 @@ export default function StaffPage() {
 
   const pressure = useQueuePressure(serviceFilter !== 'all' ? serviceFilter : 'bonafide');
 
-  if (!isSupabaseConfigured()) {
-    return (
-      <div className="max-w-4xl mx-auto px-4 py-12">
-        <AlertBanner
-          type="warning"
-          message="Supabase is not configured. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env.local file."
-        />
-      </div>
-    );
-  }
+  const demoNotice = !isSupabaseConfigured() ? (
+    <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs px-3 py-2 rounded-lg flex items-center justify-between">
+      <span>💡 Local Demo Mode active. Changes synchronize across browser tabs in real time.</span>
+    </div>
+  ) : null;
 
   if (loading) {
     return <LoadingSpinner message="Loading staff dashboard..." />;
@@ -93,6 +88,8 @@ export default function StaffPage() {
           </div>
         </div>
       </div>
+
+      {demoNotice}
 
       {/* Feedback messages */}
       {lastError && <AlertBanner type="error" message={lastError} onDismiss={clearMessages} />}

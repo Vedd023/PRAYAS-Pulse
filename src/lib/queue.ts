@@ -2,11 +2,26 @@
  * Queue operations module.
  * All database interactions for token management go through this module.
  * This is the single source of truth for queue logic.
+ *
+ * When Supabase credentials are configured, it uses live PostgreSQL and Supabase Realtime.
+ * When Supabase is not configured, it gracefully operates via local storage and BroadcastChannel,
+ * allowing full multi-tab testing on the same machine.
  */
 
 import { supabase, isSupabaseConfigured } from './supabase';
 import type { Token, TokenStatus, ServiceType } from './database.types';
 import { isValidTransition, getServiceConfig, ALLOWED_TRANSITIONS } from './database.types';
+import {
+  mockGenerateToken,
+  mockUpdateTokenStatus,
+  mockCallNextToken,
+  mockFetchTodayTokens,
+  mockFetchSessionToken,
+  mockCalculateETA,
+  mockCalculateQueuePressure,
+  mockSubscribeToTokenChanges,
+  mockResetTodayQueue,
+} from './mockQueue';
 
 // ──────────────────────────────────────────────
 // Session management
@@ -17,6 +32,7 @@ import { isValidTransition, getServiceConfig, ALLOWED_TRANSITIONS } from './data
  * Used to associate a student with their token without requiring login.
  */
 export function getSessionId(): string {
+  if (typeof window === 'undefined') return 'mock-session-id';
   let sid = localStorage.getItem('prayas_session_id');
   if (!sid) {
     sid = crypto.randomUUID();
@@ -32,17 +48,17 @@ export function getSessionId(): string {
 /**
  * Generate a new token for a service.
  * Uses a database function to atomically generate sequential token numbers.
- * Falls back to a client-side approach if the RPC is not available.
+ * Falls back to a client-side approach or mock queue if Supabase is unavailable.
  */
 export async function generateToken(
   serviceType: ServiceType,
   sessionId?: string
 ): Promise<Token> {
-  if (!isSupabaseConfigured()) {
-    throw new Error('Supabase is not configured. Please set up your environment variables.');
-  }
-
   const sid = sessionId || getSessionId();
+
+  if (!isSupabaseConfigured()) {
+    return mockGenerateToken(serviceType, sid);
+  }
 
   // Check if session already has an active token
   const { data: existingToken } = await supabase
@@ -64,12 +80,11 @@ export async function generateToken(
     });
 
   if (!rpcError && rpcToken) {
-    // rpc returns a single row or an array with one row
     const token = Array.isArray(rpcToken) ? rpcToken[0] : rpcToken;
     return token as Token;
   }
 
-  // Fallback: client-side token generation (less safe against race conditions)
+  // Fallback: client-side token generation
   console.warn('RPC generate_token not available, using client-side fallback:', rpcError?.message);
 
   const today = new Date().toISOString().slice(0, 10);
@@ -85,8 +100,9 @@ export async function generateToken(
     .limit(1);
 
   let nextNum = 1;
-  if (lastTokens && lastTokens.length > 0) {
-    const lastNum = parseInt(lastTokens[0].token_number.split('-')[1], 10);
+  const lastArray = (lastTokens as any[]) || [];
+  if (lastArray.length > 0) {
+    const lastNum = parseInt(lastArray[0].token_number.split('-')[1], 10);
     if (!isNaN(lastNum)) {
       nextNum = lastNum + 1;
     }
@@ -128,7 +144,7 @@ export async function updateTokenStatus(
   newStatus: TokenStatus
 ): Promise<Token> {
   if (!isSupabaseConfigured()) {
-    throw new Error('Supabase is not configured.');
+    return mockUpdateTokenStatus(tokenId, newStatus);
   }
 
   // Fetch current token
@@ -165,7 +181,6 @@ export async function updateTokenStatus(
       updates.completed_at = now;
       break;
     case 'skipped':
-      // skipped tokens keep their timestamps for audit
       break;
   }
 
@@ -191,7 +206,7 @@ export async function callNextToken(
   counterNumber: number = 1
 ): Promise<Token | null> {
   if (!isSupabaseConfigured()) {
-    throw new Error('Supabase is not configured.');
+    return mockCallNextToken(serviceType, counterNumber);
   }
 
   // Build query for next waiting token (FIFO)
@@ -212,11 +227,12 @@ export async function callNextToken(
     throw new Error(`Failed to fetch next token: ${error.message}`);
   }
 
-  if (!waitingTokens || waitingTokens.length === 0) {
+  const waitingArray = (waitingTokens as any[]) || [];
+  if (waitingArray.length === 0) {
     return null;
   }
 
-  const nextToken = waitingTokens[0] as Token;
+  const nextToken = waitingArray[0] as Token;
 
   // Update to called
   const now = new Date().toISOString();
@@ -245,6 +261,10 @@ export async function callNextToken(
 
 /** Fetch all tokens for today, ordered by creation time. */
 export async function fetchTodayTokens(): Promise<Token[]> {
+  if (!isSupabaseConfigured()) {
+    return mockFetchTodayTokens();
+  }
+
   const today = new Date().toISOString().slice(0, 10);
 
   const { data, error } = await supabase
@@ -264,6 +284,10 @@ export async function fetchTodayTokens(): Promise<Token[]> {
 export async function fetchSessionToken(sessionId?: string): Promise<Token | null> {
   const sid = sessionId || getSessionId();
 
+  if (!isSupabaseConfigured()) {
+    return mockFetchSessionToken(sid);
+  }
+
   const { data, error } = await supabase
     .from('tokens')
     .select('*')
@@ -281,28 +305,8 @@ export async function fetchSessionToken(sessionId?: string): Promise<Token | nul
   return (data as unknown as Token) || null;
 }
 
-/** Fetch tokens by status */
-export async function fetchTokensByStatus(status: TokenStatus | TokenStatus[]): Promise<Token[]> {
-  const today = new Date().toISOString().slice(0, 10);
-  const statuses = Array.isArray(status) ? status : [status];
-
-  const { data, error } = await supabase
-    .from('tokens')
-    .select('*')
-    .in('status', statuses)
-    .gte('created_at', `${today}T00:00:00`)
-    .order('created_at', { ascending: true });
-
-  if (error) {
-    throw new Error(`Failed to fetch tokens: ${error.message}`);
-  }
-
-  return (data || []) as Token[];
-}
-
-/** Create a walk-in token (no session association). */
+/** Create a walk-in token (no browser session association). */
 export async function createWalkInToken(serviceType: ServiceType): Promise<Token> {
-  // Use a unique walk-in session prefix so it doesn't collide with browser sessions
   const walkInSessionId = `walkin-${crypto.randomUUID()}`;
   return generateToken(serviceType, walkInSessionId);
 }
@@ -316,27 +320,21 @@ export async function createWalkInToken(serviceType: ServiceType): Promise<Token
  *
  * Formula (single counter):
  *   ETA = tokensAhead × avgServiceDuration
- *
- * avgServiceDuration is computed from the rolling average of the last N
- * completed service durations for the same service type.
- * Falls back to the configured default if insufficient data.
- *
- * Limitations:
- * - Assumes one counter per service queue.
- * - Does not account for variable service complexity.
- * - Past averages may not reflect future service times.
  */
 export async function calculateETA(
   serviceType: ServiceType,
   tokensAhead: number
 ): Promise<{ estimatedMinutes: number; basedOnHistory: boolean; sampleSize: number }> {
+  if (!isSupabaseConfigured()) {
+    return mockCalculateETA(serviceType, tokensAhead);
+  }
+
   const config = getServiceConfig(serviceType);
 
   if (tokensAhead <= 0) {
     return { estimatedMinutes: 0, basedOnHistory: true, sampleSize: 0 };
   }
 
-  // Fetch last 20 completed tokens for this service to compute average duration
   const today = new Date().toISOString().slice(0, 10);
   const { data: completedTokens } = await supabase
     .from('tokens')
@@ -356,13 +354,11 @@ export async function calculateETA(
   if (records.length >= 3) {
     const durations: number[] = [];
     for (const t of records) {
-      // Service duration = completed_at - (started_at or called_at)
       const startTime = t.started_at || t.called_at;
       if (startTime && t.completed_at) {
         const durationMs = new Date(t.completed_at).getTime() - new Date(startTime).getTime();
         const durationMin = durationMs / 60000;
         if (durationMin > 0 && durationMin < 120) {
-          // Filter outliers > 2 hours
           durations.push(durationMin);
         }
       }
@@ -387,29 +383,19 @@ export async function calculateETA(
 export interface QueuePressure {
   level: 'normal' | 'watch' | 'congested' | 'unknown';
   ratio: number | null;
-  arrivalRate: number | null;    // tokens per minute
-  serviceRate: number | null;    // tokens per minute
+  arrivalRate: number | null;
+  serviceRate: number | null;
   windowMinutes: number;
 }
 
-/**
- * Calculate queue pressure for a service.
- *
- * Pressure = arrivalRate / serviceRate
- * - arrivalRate: tokens created in the observation window / window minutes
- * - serviceRate: tokens completed in the observation window / window minutes
- *
- * Thresholds:
- * - NORMAL: pressure < 0.8
- * - WATCH: 0.8 <= pressure < 1.0
- * - CONGESTED: pressure >= 1.0
- *
- * If insufficient data (< 3 observations), returns 'unknown'.
- */
 export async function calculateQueuePressure(
   serviceType: ServiceType,
   windowMinutes: number = 15
 ): Promise<QueuePressure> {
+  if (!isSupabaseConfigured()) {
+    return mockCalculateQueuePressure(serviceType, windowMinutes);
+  }
+
   const unknown: QueuePressure = {
     level: 'unknown',
     ratio: null,
@@ -421,14 +407,12 @@ export async function calculateQueuePressure(
   try {
     const windowStart = new Date(Date.now() - windowMinutes * 60 * 1000).toISOString();
 
-    // Count tokens created in window (arrivals)
     const { count: arrivals } = await supabase
       .from('tokens')
       .select('*', { count: 'exact', head: true })
       .eq('service_type', serviceType)
       .gte('created_at', windowStart);
 
-    // Count tokens completed in window (service)
     const { count: completed } = await supabase
       .from('tokens')
       .select('*', { count: 'exact', head: true })
@@ -444,7 +428,6 @@ export async function calculateQueuePressure(
     const serviceRate = (completed || 0) / windowMinutes;
 
     if (serviceRate === 0) {
-      // No completions yet — can't compute meaningful ratio
       if (arrivals >= 5) {
         return {
           level: 'watch',
@@ -480,6 +463,10 @@ export async function calculateQueuePressure(
 export function subscribeToTokenChanges(
   callback: (payload: { eventType: string; new: Token; old: Token }) => void
 ): () => void {
+  if (!isSupabaseConfigured()) {
+    return mockSubscribeToTokenChanges(callback);
+  }
+
   const channel = supabase
     .channel('tokens-realtime')
     .on(
@@ -505,11 +492,15 @@ export function subscribeToTokenChanges(
 }
 
 // ──────────────────────────────────────────────
-// Admin: Reset Queue
+// Reset Queue
 // ──────────────────────────────────────────────
 
 /** Reset all tokens for today. Used for demo resets. */
 export async function resetTodayQueue(): Promise<void> {
+  if (!isSupabaseConfigured()) {
+    return mockResetTodayQueue();
+  }
+
   const today = new Date().toISOString().slice(0, 10);
 
   const { error } = await supabase

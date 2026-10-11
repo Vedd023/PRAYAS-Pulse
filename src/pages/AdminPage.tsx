@@ -11,16 +11,11 @@ import {
 export default function AdminPage() {
   const { tokens, stats, loading, error } = useQueueData();
 
-  if (!isSupabaseConfigured()) {
-    return (
-      <div className="max-w-4xl mx-auto px-4 py-12">
-        <AlertBanner
-          type="warning"
-          message="Supabase is not configured. Please set environment variables."
-        />
-      </div>
-    );
-  }
+  const demoNotice = !isSupabaseConfigured() ? (
+    <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs px-3 py-2 rounded-lg flex items-center justify-between">
+      <span>💡 Local Demo Mode active. Analytics reflect local queue activity.</span>
+    </div>
+  ) : null;
 
   if (loading) return <LoadingSpinner message="Loading admin overview..." />;
 
@@ -55,6 +50,8 @@ export default function AdminPage() {
         <h1 className="text-2xl font-bold text-slate-900">Admin Overview</h1>
         <p className="text-sm text-slate-500 mt-1">Summary of today's queue activity</p>
       </div>
+
+      {demoNotice}
 
       {error && <AlertBanner type="error" message={error} />}
 
