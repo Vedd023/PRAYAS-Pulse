@@ -278,7 +278,7 @@ export async function fetchSessionToken(sessionId?: string): Promise<Token | nul
     return null;
   }
 
-  return (data as Token) || null;
+  return (data as unknown as Token) || null;
 }
 
 /** Fetch tokens by status */
@@ -352,9 +352,10 @@ export async function calculateETA(
   let basedOnHistory = false;
   let sampleSize = 0;
 
-  if (completedTokens && completedTokens.length >= 3) {
+  const records = (completedTokens as any[]) || [];
+  if (records.length >= 3) {
     const durations: number[] = [];
-    for (const t of completedTokens) {
+    for (const t of records) {
       // Service duration = completed_at - (started_at or called_at)
       const startTime = t.started_at || t.called_at;
       if (startTime && t.completed_at) {
